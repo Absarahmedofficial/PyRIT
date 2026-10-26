@@ -234,7 +234,7 @@ class TestTechniqueInitializerBasic:
         assert description
 
     def test_tags_parameter_defaults_to_core(self):
-        params = {p.name: p for p in TechniqueInitializer().supported_parameters}
+        params = {p.name: p for p in TechniqueInitializer.supported_parameters()}
         assert "tags" in params
         assert params["tags"].default == ["core"]
 
@@ -512,7 +512,7 @@ class TestTechniqueInitializerRegistration:
 
     async def test_extra_tag_registers_extra_techniques(self, mock_adversarial_target):
         init = TechniqueInitializer()
-        init.params = {"tags": ["extra"]}
+        init.set_params_from_args(args={"tags": ["extra"]})
         await init.initialize_async()
 
         names = set(AttackTechniqueRegistry.get_registry_singleton().instances.get_names())
@@ -520,7 +520,7 @@ class TestTechniqueInitializerRegistration:
 
     async def test_all_tag_registers_everything(self, mock_adversarial_target):
         init = TechniqueInitializer()
-        init.params = {"tags": ["all"]}
+        init.set_params_from_args(args={"tags": ["all"]})
         await init.initialize_async()
 
         names = set(AttackTechniqueRegistry.get_registry_singleton().instances.get_names())
@@ -620,7 +620,7 @@ class TestViolentDurianTechnique:
 
     async def test_registered_when_extra_selected(self, mock_adversarial_target):
         init = TechniqueInitializer()
-        init.params = {"tags": ["extra"]}
+        init.set_params_from_args(args={"tags": ["extra"]})
         await init.initialize_async()
 
         assert "violent_durian" in set(AttackTechniqueRegistry.get_registry_singleton().instances.get_names())
@@ -826,7 +826,7 @@ class TestGoatTechnique:
 
     async def test_registered_when_extra_selected(self, mock_adversarial_target):
         init = TechniqueInitializer()
-        init.params = {"tags": ["extra"]}
+        init.set_params_from_args(args={"tags": ["extra"]})
         await init.initialize_async()
 
         assert "goat" in set(AttackTechniqueRegistry.get_registry_singleton().instances.get_names())
