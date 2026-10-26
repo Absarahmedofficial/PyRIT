@@ -64,6 +64,7 @@ EXTRA_TECHNIQUE_NAMES: list[str] = [
     "split_payload",
     "code_attack_framed",
     "char_split",
+    "context_wrap",
 ]
 
 PERSONA_CRESCENDO_TECHNIQUE_NAMES: list[str] = [
@@ -502,6 +503,7 @@ class TestTechniqueInitializerRegistration:
         assert "violent_durian" not in names
         assert "split_payload" not in names
         assert "char_split" not in names
+        assert "context_wrap" not in names
 
     async def test_registered_core_factory_carries_core_tag(self, mock_adversarial_target):
         init = TechniqueInitializer()
