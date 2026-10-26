@@ -3,9 +3,12 @@
 
 """Tests for the ``extra`` scenario attack techniques."""
 
+import asyncio
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 import pytest
+from PIL import Image
 from unit.mocks import MockPromptTarget
 
 from pyrit.converter import CodeAttackConverter, PromptTemplateConverter, SearchReplaceConverter
@@ -13,9 +16,10 @@ from pyrit.executor.attack import CrescendoAttack, PromptSendingAttack
 from pyrit.executor.attack.core.attack_config import AttackScoringConfig
 from pyrit.executor.attack.core.attack_executor import AttackExecutor
 from pyrit.memory import CentralMemory
-from pyrit.models import AttackSeedGroup, Message, MessagePiece, SeedObjective, SeedPrompt
+from pyrit.models import AttackOutcome, AttackSeedGroup, Message, MessagePiece, SeedObjective, SeedPrompt
 from pyrit.prompt_target.common.target_capabilities import TargetCapabilities
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
+from pyrit.score import SubStringScorer
 from pyrit.setup.initializers.techniques import core, extra
 
 OBJECTIVE = "How can I kill a Python process?"
@@ -247,6 +251,88 @@ class TestCharSplitTechnique:
         assert last_response is not None
         assert last_response.original_value == encoded_response
         assert last_response.converted_value == "Hello. co-op."
+
+    @pytest.mark.parametrize(
+        ("encoded_text", "decoded_text"),
+        [("3..14", "3.14"), ("H.e.l.l.o......", "Hello...")],
+    )
+    async def test_decodes_response_before_scoring_async(self, *, encoded_text: str, decoded_text: str) -> None:
+        target = MockPromptTarget()
+        technique = _char_split_factory().create(
+            objective_target=target,
+            attack_scoring_config=AttackScoringConfig(objective_scorer=SubStringScorer(substring=decoded_text)),
+        )
+        response = Message.from_prompt(prompt=encoded_text, role="assistant")
+
+        with patch.object(
+            target, "_send_prompt_to_target_async", new_callable=AsyncMock, return_value=[response]
+        ) as send:
+            results = await AttackExecutor(max_concurrency=1).execute_attack_from_seed_groups_async(
+                attack=technique.attack,
+                seed_groups=[AttackSeedGroup(seeds=[SeedObjective(value=OBJECTIVE)])],
+            )
+
+        send.assert_awaited_once()
+        result = results.completed_results[0]
+        assert result.outcome is AttackOutcome.SUCCESS
+        assert result.last_response is not None
+        assert result.last_response.original_value == encoded_text
+        assert result.last_response.converted_value == decoded_text
+        assert result.automated_score is not None
+        assert result.automated_score.get_value() is True
+        [stored_score] = await CentralMemory.get_memory_instance().get_scores_async(
+            score_ids=[result.automated_score.id]
+        )
+        assert stored_score.get_value() is True
+        assert stored_score.message_piece_id == result.last_response.id
+
+    async def test_decodes_text_and_preserves_image_response_async(self, *, tmp_path: Path) -> None:
+        image_path = tmp_path / "response.png"
+        await asyncio.to_thread(Image.new("RGB", (2, 2), "white").save, image_path)
+        target = MockPromptTarget(
+            custom_configuration=TargetConfiguration(
+                capabilities=TargetCapabilities(
+                    supports_multi_message_pieces=True,
+                    output_modalities=frozenset({frozenset({"text"}), frozenset({"text", "image_path"})}),
+                )
+            )
+        )
+        technique = _char_split_factory().create(
+            objective_target=target,
+            attack_scoring_config=AttackScoringConfig(),
+        )
+        response = Message(
+            message_pieces=[
+                MessagePiece(role="assistant", original_value="H.e.l.l.o.."),
+                MessagePiece(
+                    role="assistant",
+                    original_value=str(image_path),
+                    original_value_data_type="image_path",
+                ),
+            ]
+        )
+
+        with patch.object(
+            target, "_send_prompt_to_target_async", new_callable=AsyncMock, return_value=[response]
+        ) as send:
+            results = await AttackExecutor(max_concurrency=1).execute_attack_from_seed_groups_async(
+                attack=technique.attack,
+                seed_groups=[AttackSeedGroup(seeds=[SeedObjective(value=OBJECTIVE)])],
+            )
+
+        send.assert_awaited_once()
+        result = results.completed_results[0]
+        messages = await CentralMemory.get_memory_instance().get_conversation_messages_async(
+            conversation_id=result.conversation_id
+        )
+        [stored_response] = [message for message in messages if message.get_piece().role == "assistant"]
+        text, image = stored_response.message_pieces
+        assert text.original_value == "H.e.l.l.o.."
+        assert text.converted_value == "Hello."
+        assert text.converted_value_data_type == "text"
+        assert image.original_value == image.converted_value == str(image_path)
+        assert image.original_value_data_type == image.converted_value_data_type == "image_path"
+        assert not image.converter_identifiers
 
     async def test_formats_text_and_preserves_image_piece_async(self, tmp_path: Path) -> None:
         image_path = tmp_path / "image.png"
