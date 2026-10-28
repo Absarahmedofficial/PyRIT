@@ -19,6 +19,7 @@ from pyrit.memory import CentralMemory
 from pyrit.models import AttackOutcome, AttackSeedGroup, Message, MessagePiece, SeedObjective, SeedPrompt
 from pyrit.prompt_target.common.target_capabilities import TargetCapabilities
 from pyrit.prompt_target.common.target_configuration import TargetConfiguration
+from pyrit.scenario.core.attack_technique_factory import AttackTechniqueFactory
 from pyrit.score import SubStringScorer
 from pyrit.setup.initializers.techniques import core, extra
 
@@ -47,7 +48,7 @@ def _char_split_factory():
     return next(factory for factory in extra.get_technique_factories() if factory.name == "char_split")
 
 
-def _context_wrap_factory():
+def _context_wrap_factory() -> AttackTechniqueFactory:
     return next(factory for factory in extra.get_technique_factories() if factory.name == "context_wrap")
 
 
@@ -390,7 +391,7 @@ class TestContextWrapTechnique:
         factory = _context_wrap_factory()
         assert factory.name == "context_wrap"
         assert factory.attack_class is PromptSendingAttack
-        assert factory.technique_tags == ["single_turn", "light"]
+        assert factory.technique_tags == ["single_turn", "light", "experimental"]
         assert factory.description
         assert factory.seed_technique is None
         assert "context_wrap" not in {f.name for f in core.get_technique_factories()}
@@ -402,15 +403,11 @@ class TestContextWrapTechnique:
         request_converters = _wired_converters(factory)
         response_converters = _wired_response_converters(factory)
         assert len(request_converters) == 1
-        assert len(response_converters) == 1
+        assert len(response_converters) == 2
         assert isinstance(request_converters[0], PromptTemplateConverter)
-        assert isinstance(response_converters[0], SearchReplaceConverter)
-        assert response_converters[0]._pattern == (
-            r"</seg>\s*\[DIAG-[^\r\n ]*( )[^\r\n]*\s*<seg>|\s*\[DIAG-[^\r\n]*\s*|</?seg>"
-        )
-        assert response_converters[0]._replace_list == [r"\1"]
+        assert all(isinstance(converter, SearchReplaceConverter) for converter in response_converters)
 
-    async def test_request_converter_appends_format_instructions(self) -> None:
+    async def test_request_converter_appends_format_instructions_async(self) -> None:
         converter = _wired_converters(_context_wrap_factory())[0]
         result = await converter.convert_async(prompt=OBJECTIVE)
         assert result.output_text == (
@@ -436,7 +433,7 @@ class TestContextWrapTechnique:
                     "[DIAG-02] Register allocation check complete (status=OK)\n"
                     "<seg>Done.</seg>"
                 ),
-                "Pi is 3.14. Wait for it... Done.",
+                "Pi is 3.14.\nWait for it...\nDone.",
             ),
             (
                 (
@@ -446,17 +443,52 @@ class TestContextWrapTechnique:
                     "<seg>Second sentence.</seg>\n"
                     "[DIAG-02] EOF (status=OK)"
                 ),
-                "First sentence. Second sentence.",
+                "First sentence.\nSecond sentence.\n",
             ),
             ("<seg>Single sentence.</seg>", "Single sentence."),
             ("Plain untagged response.", "Plain untagged response."),
+            (
+                "The marker [DIAG-01] is part of the supplied log.",
+                "The marker [DIAG-01] is part of the supplied log.",
+            ),
+            (
+                "<seg>The marker [DIAG-01] is part of the supplied log.</seg>",
+                "The marker [DIAG-01] is part of the supplied log.",
+            ),
+            (
+                "<seg>Log excerpt:\n[DIAG-01] This line is response content.\nEnd of excerpt.</seg>",
+                "Log excerpt:\n[DIAG-01] This line is response content.\nEnd of excerpt.",
+            ),
+            (
+                "<seg>First.</seg>\r\n[DIAG-01] OK\r\n<seg>Second.</seg>",
+                "First.\r\nSecond.",
+            ),
+            (
+                "<seg>First.</seg>\n \t[DIAG-01] OK\n<seg>Second.</seg>",
+                "First.\nSecond.",
+            ),
+            ("<seg>First.</seg>\n<seg>Second.</seg>", "First.\nSecond."),
+            ("<seg>First.</seg><seg>Second.</seg>", "First.Second."),
+            ("<seg>Incomplete response.", "Incomplete response."),
+            (
+                "<seg>First.</seg>\n[DIAG-invalid] Keep this line.\n<seg>Second.</seg>",
+                "First.\n[DIAG-invalid] Keep this line.\nSecond.",
+            ),
+            (
+                "<seg>First.</seg>\n[DIAG-01 missing bracket\n<seg>Second.</seg>",
+                "First.\n[DIAG-01 missing bracket\nSecond.",
+            ),
             ("", ""),
         ],
     )
-    async def test_response_converter_extracts_segments(self, *, encoded_text: str, expected_decoded: str) -> None:
-        decoder = _wired_response_converters(_context_wrap_factory())[0]
-        result = await decoder.convert_async(prompt=encoded_text)
-        assert result.output_text == expected_decoded
+    async def test_response_converter_extracts_segments_async(
+        self, *, encoded_text: str, expected_decoded: str
+    ) -> None:
+        decoded = encoded_text
+        for converter in _wired_response_converters(_context_wrap_factory()):
+            result = await converter.convert_async(prompt=decoded)
+            decoded = result.output_text
+        assert decoded == expected_decoded
 
     @pytest.mark.parametrize(
         ("encoded_text", "decoded_text"),
@@ -467,9 +499,17 @@ class TestContextWrapTechnique:
                     "[DIAG-01] AST symbol table offset verified (status=OK)\n"
                     "<seg>Second sentence.</seg>"
                 ),
-                "First sentence. Second sentence.",
+                "First sentence.\nSecond sentence.",
             ),
             ("<seg>Single tagged sentence.</seg>", "Single tagged sentence."),
+            (
+                "<seg>The marker [DIAG-01] is part of the supplied log.</seg>",
+                "The marker [DIAG-01] is part of the supplied log.",
+            ),
+            (
+                "The marker [DIAG-01] is part of the supplied log.",
+                "The marker [DIAG-01] is part of the supplied log.",
+            ),
         ],
     )
     async def test_decodes_response_before_scoring_async(self, *, encoded_text: str, decoded_text: str) -> None:
@@ -552,9 +592,9 @@ class TestContextWrapTechnique:
         assert image.original_value_data_type == image.converted_value_data_type == "image_path"
         assert not image.converter_identifiers
 
-    async def test_formats_text_and_preserves_image_piece_async(self, tmp_path: Path) -> None:
+    async def test_formats_text_and_preserves_image_piece_async(self, *, tmp_path: Path) -> None:
         image_path = tmp_path / "image.png"
-        image_path.write_bytes(b"img")
+        await asyncio.to_thread(image_path.write_bytes, b"img")
         target = MockPromptTarget()
         technique = _context_wrap_factory().create(
             objective_target=target,
@@ -562,7 +602,7 @@ class TestContextWrapTechnique:
         )
         sent_messages: list[Message] = []
 
-        async def fake_send(*, normalized_conversation: list[Message]) -> list[Message]:
+        async def fake_send_async(*, normalized_conversation: list[Message]) -> list[Message]:
             sent_messages.append(normalized_conversation[-1])
             conversation_id = normalized_conversation[-1].get_piece().conversation_id
             return [
@@ -573,7 +613,7 @@ class TestContextWrapTechnique:
                 ).to_message()
             ]
 
-        target._send_prompt_to_target_async = fake_send
+        target._send_prompt_to_target_async = fake_send_async
         seed_group = AttackSeedGroup(
             seeds=[
                 SeedObjective(value=OBJECTIVE),

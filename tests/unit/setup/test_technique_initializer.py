@@ -520,6 +520,15 @@ class TestTechniqueInitializerRegistration:
         names = set(AttackTechniqueRegistry.get_registry_singleton().instances.get_names())
         assert set(EXTRA_TECHNIQUE_NAMES) <= names
 
+    @pytest.mark.usefixtures("patch_central_database")
+    async def test_context_wrap_retains_experimental_tag_async(self) -> None:
+        init = TechniqueInitializer()
+        init.set_params_from_args(args={"tags": ["extra"]})
+        await init.initialize_async()
+
+        factory = AttackTechniqueRegistry.get_registry_singleton().get_factories()["context_wrap"]
+        assert set(factory.technique_tags) == {"single_turn", "light", "experimental", "extra"}
+
     async def test_all_tag_registers_everything(self, mock_adversarial_target):
         init = TechniqueInitializer()
         init.set_params_from_args(args={"tags": ["all"]})
